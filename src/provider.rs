@@ -22,7 +22,10 @@
 //! let client = provider.get_client();
 //! ```
 
-use std::{sync::OnceLock, time::Duration};
+use std::{
+    sync::{Mutex, OnceLock},
+    time::Duration,
+};
 
 use log::{debug, error, info, trace};
 use mongodb::{
@@ -37,9 +40,10 @@ use mongodb::{
 use crate::{
     RepositoryConfig,
     errors::{MongoError, RepositoryError},
+    provider,
 };
 
-static PROVIDER: OnceLock<Provider> = OnceLock::new();
+static PROVIDER: OnceLock<Mutex<Provider>> = OnceLock::new();
 
 /// Singleton MongoDB provider for repository access.
 ///
@@ -56,7 +60,7 @@ impl Provider {
     /// and connection pool settings. Pings the database to verify connectivity.
     ///
     /// Returns a reference to the singleton [`Provider`] on success.
-    pub async fn init(repository_config: &RepositoryConfig) -> Result<&Self, RepositoryError> {
+    pub async fn init(repository_config: &RepositoryConfig) -> Result<(), RepositoryError> {
         let conn_url = repository_config.primary_mongo_url.clone();
         debug!("Parsing connection string into ClientOptions");
         let mut client_options = match ClientOptions::parse(conn_url).await {
@@ -86,34 +90,27 @@ impl Provider {
 
         match Client::with_options(client_options) {
             Ok(client) => {
-                match client
-                    .database("admin")
-                    .run_command(doc! {"ping": 1})
-                    .with_options(None)
-                    .await
-                {
-                    Ok(_) => {
-                        info!("Pinged deployment. Successfully connected to MongoDB!");
+                info!("Created MongoDB client");
+                // Ping the database to verify connectivity in a separate thread
 
-                        let provider = Provider { client: client };
-                        if let Err(_) = PROVIDER.set(provider) {
-                            error!("Failed to set provider");
-                            return Err(RepositoryError::InitializationFailed);
-                        }
-                        return Ok(PROVIDER.get().unwrap());
+                let provider = Provider { client };
+
+                match PROVIDER.set(Mutex::new(provider)) {
+                    Ok(_) => {
+                        info!("MongoDB provider initialized successfully");
+                        // Start the ping test in a separate async task
+                        tokio::spawn(Self::start_ping_test());
+                        return Ok(());
                     }
-                    Err(e) => {
-                        error!(
-                            "Could not ping DB cluster. This could be due a configuration issue {}",
-                            e
-                        );
+                    Err(_) => {
+                        error!("MongoDB provider has already been initialized");
                         return Err(RepositoryError::InitializationFailed);
                     }
                 }
             }
             Err(e) => {
-                error!("Could not get client {}", e);
-                return Err(RepositoryError::ClientError(MongoError::from(e)));
+                error!("Error creating MongoDB client: {}", e);
+                return Err(RepositoryError::InitializationFailed);
             }
         }
     }
@@ -123,7 +120,7 @@ impl Provider {
     /// Returns an error if the provider has not been initialized.
     pub fn get_provider() -> Result<Provider, RepositoryError> {
         match PROVIDER.get() {
-            Some(provider) => Ok(provider.clone()),
+            Some(provider) => Ok(provider.lock().unwrap().clone()),
             None => Err(RepositoryError::UnIntialized),
         }
     }
@@ -131,5 +128,34 @@ impl Provider {
     /// Returns a clone of the underlying MongoDB [`Client`].
     pub fn get_client(&self) -> Client {
         self.client.clone()
+    }
+
+    async fn start_ping_test() {
+        // clone the client so the spawned tasks own their client handle
+        let client = PROVIDER.get().unwrap().lock().unwrap().client.clone();
+        // wait for 30 seconds before starting the ping test to allow initial connections to establish
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        info!("Starting MongoDB ping test task");
+        // run a ping test in an endless loop
+        loop {
+            let client = client.clone();
+            tokio::spawn(async move {
+                match client
+                    .database("admin")
+                    .run_command(doc! {"ping": 1})
+                    .with_options(None)
+                    .await
+                {
+                    Ok(_) => info!("Pinged deployment. Successfully connected to MongoDB!"),
+                    Err(e) => {
+                        error!(
+                            "Could not ping DB cluster. This could be due a configuration issue {}",
+                            e
+                        );
+                    }
+                }
+            });
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
     }
 }
