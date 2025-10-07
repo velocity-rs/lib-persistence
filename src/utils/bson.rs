@@ -26,7 +26,6 @@ pub fn get_value_from_doc(doc: Document) -> Result<Value, DeError> {
     };
 }
 
-#[expect(unused)]
 pub fn to_doc<T>(t: &T) -> Result<Document, SeError>
 where
     T: Serialize,

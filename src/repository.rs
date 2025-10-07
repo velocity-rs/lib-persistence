@@ -3,18 +3,17 @@ use std::{
     sync::OnceLock,
 };
 
-use log::{debug, error, info, trace};
+use log::{debug, error, info};
 use mongodb::{
-    Client, ClientSession, Collection, Database, IndexModel,
+    Client, ClientSession, Collection, Database,
     bson::{self, Document},
-    options::{IndexOptions, SessionOptions},
+    options::SessionOptions,
 };
 
 use crate::provider::Provider;
 use serde::Serialize;
-use serde::de::DeserializeOwned;
-use serde_json::{Map, Value};
-use tokio::time::Instant;
+
+use serde_json::Value;
 
 use super::errors::{MongoError, RepositoryError};
 
